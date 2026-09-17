@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Message } from "@/types/chat";
-import { InventoryItem } from "@/types/inventory";
+import { InventoryItem, PendingClarification } from "@/types/inventory";
 import { INITIAL_CANONICAL_INVENTORY } from "@/lib/inventory";
 import { processInventoryTurn } from "@/lib/inventoryFlow";
 
@@ -11,10 +11,16 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
-    const { messages, currentInventory, inventoryInitialized } = body as {
+    const {
+      messages,
+      currentInventory,
+      inventoryInitialized,
+      pendingClarification,
+    } = body as {
       messages?: Message[];
       currentInventory?: InventoryItem[];
       inventoryInitialized?: boolean;
+      pendingClarification?: PendingClarification | null;
     };
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
@@ -29,7 +35,8 @@ export async function POST(req: Request) {
       messages,
       inventoryToUse,
       req.signal,
-      inventoryInitialized ?? false
+      inventoryInitialized ?? false,
+      pendingClarification
     );
 
     if (req.signal.aborted) {
@@ -43,6 +50,7 @@ export async function POST(req: Request) {
       cbm: result.cbm,
       storageRecommendation: result.storageRecommendation,
       inventoryInitialized: result.inventoryInitialized,
+      pendingClarification: result.pendingClarification,
     });
   } catch (error: unknown) {
     if (

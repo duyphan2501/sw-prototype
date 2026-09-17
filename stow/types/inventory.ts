@@ -37,5 +37,6 @@ export interface StorageRecommendation {
   capacityCbm: number;
 }
 
-
-
+export interface PendingClarification {
+  items: InventoryItem[];
+}

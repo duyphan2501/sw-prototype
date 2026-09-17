@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Message } from "@/types/chat";
-import { InventoryItem } from "@/types/inventory";
+import { InventoryItem, PendingClarification } from "@/types/inventory";
 import { INITIAL_CANONICAL_INVENTORY } from "@/lib/inventory";
 import ChatMessageList from "@/components/ChatMessageList";
 import ChatInput from "@/components/ChatInput";
@@ -24,6 +24,8 @@ export default function Chat() {
   );
   const [inventoryInitialized, setInventoryInitialized] =
     useState<boolean>(false);
+  const [pendingClarification, setPendingClarification] =
+    useState<PendingClarification | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -82,6 +84,7 @@ export default function Chat() {
           messages: newMessages,
           currentInventory: canonicalInventory,
           inventoryInitialized,
+          pendingClarification,
         }),
       });
 
@@ -109,6 +112,10 @@ export default function Chat() {
 
       if (typeof data.inventoryInitialized === "boolean") {
         setInventoryInitialized(data.inventoryInitialized);
+      }
+
+      if (data.pendingClarification !== undefined) {
+        setPendingClarification(data.pendingClarification);
       }
 
       const assistantMessage: Message = {

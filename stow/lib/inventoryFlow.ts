@@ -2,6 +2,7 @@ import {
   InventoryItem,
   InventoryItemType,
   InventoryOperation,
+  PendingClarification,
   StorageRecommendation,
 } from "@/types/inventory";
 import { applyInventoryOperation } from "@/lib/inventory";
@@ -18,6 +19,7 @@ export interface InventoryFlowResult {
   storageRecommendation: StorageRecommendation | null;
   operation: "REPLACE" | "ADD" | "REMOVE" | "UNCLEAR" | "CONVERSATION";
   inventoryInitialized: boolean;
+  pendingClarification: PendingClarification | null;
 }
 
 const ITEM_DISPLAY_NAMES: Record<InventoryItemType, string> = {
@@ -43,65 +45,109 @@ export async function processInventoryTurn(
   messages: Message[],
   currentInventory: InventoryItem[],
   signal?: AbortSignal,
-  inventoryInitialized: boolean = false
+  inventoryInitialized: boolean = false,
+  pendingClarification?: PendingClarification | null
 ): Promise<InventoryFlowResult> {
   const latestMessage = messages[messages.length - 1];
   const userText = latestMessage?.content || "";
+  const cleanText = userText
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?,]+$/, "")
+    .trim();
 
-  // 1. Extract structured intent via LLM
-  const intent = await extractInventoryIntent(userText, signal);
-
-  // 2. Resolve operation considering canonical inventory state
-  let resolvedOperation: InventoryOperation;
+  let resolvedOperation: InventoryOperation | null = null;
   let nextInventoryInitialized = inventoryInitialized;
+  let nextPendingClarification: PendingClarification | null = null;
 
-  if (intent.operation === "UNCLEAR") {
-    // If inventory has not been initialized yet and the user provides identifiable inventory items:
-    // - Do not ask whether to ADD or REPLACE.
-    // - Treat the request as initializing the inventory (REPLACE).
-    // - Apply the identified items as the canonical inventory.
-    if (intent.items && intent.items.length > 0 && !inventoryInitialized) {
+  // 1. Check if user is directly answering a pending clarification question
+  if (
+    pendingClarification &&
+    pendingClarification.items &&
+    pendingClarification.items.length > 0
+  ) {
+    const isAddAnswer =
+      /^(please\s+)?add(\s+(them|these|it|all|to\s+(my\s+)?(current\s+|existing\s+)?inventory))?$/i.test(
+        cleanText
+      );
+    const isReplaceAnswer =
+      /^(please\s+)?replace(\s+(them|these|it|all|(my\s+)?(current\s+|existing\s+)?inventory))?$/i.test(
+        cleanText
+      );
+
+    if (isAddAnswer) {
       resolvedOperation = {
-        operation: "REPLACE",
-        items: intent.items,
+        operation: "ADD",
+        items: pendingClarification.items,
       };
       nextInventoryInitialized = true;
-    } else {
-      const currentCbm = calculateCbm(currentInventory);
-      const currentRecommendation = recommendStorageUnit(currentCbm);
+      nextPendingClarification = null;
+    } else if (isReplaceAnswer) {
+      resolvedOperation = {
+        operation: "REPLACE",
+        items: pendingClarification.items,
+      };
+      nextInventoryInitialized = true;
+      nextPendingClarification = null;
+    }
+  }
 
-      if (intent.items && intent.items.length > 0) {
-        const itemsSummary = formatInventorySummary(intent.items);
+  // 2. If not answering pending clarification, extract structured intent via LLM
+  if (!resolvedOperation) {
+    const intent = await extractInventoryIntent(userText, signal);
+
+    if (intent.operation === "UNCLEAR") {
+      // If inventory has not been initialized yet and the user provides identifiable inventory items:
+      // - Do not ask whether to ADD or REPLACE.
+      // - Treat the request as initializing the inventory (REPLACE).
+      // - Apply the identified items as the canonical inventory.
+      if (intent.items && intent.items.length > 0 && !inventoryInitialized) {
+        resolvedOperation = {
+          operation: "REPLACE",
+          items: intent.items,
+        };
+        nextInventoryInitialized = true;
+        nextPendingClarification = null;
+      } else {
+        const currentCbm = calculateCbm(currentInventory);
+        const currentRecommendation = recommendStorageUnit(currentCbm);
+
+        if (intent.items && intent.items.length > 0) {
+          const itemsSummary = formatInventorySummary(intent.items);
+          return {
+            content: `Would you like me to add ${itemsSummary} to your current inventory, or replace your current inventory with those items?`,
+            updatedInventory: currentInventory,
+            cbm: currentCbm,
+            storageRecommendation: currentRecommendation,
+            operation: "UNCLEAR",
+            inventoryInitialized: true,
+            pendingClarification: { items: intent.items },
+          };
+        }
+
+        // General conversation: respond naturally without mutating inventory
+        const conversationReply = await callLLM(messages, signal);
         return {
-          content: `Would you like me to add ${itemsSummary} to your current inventory, or replace your current inventory with those items?`,
+          content: conversationReply,
           updatedInventory: currentInventory,
           cbm: currentCbm,
           storageRecommendation: currentRecommendation,
-          operation: "UNCLEAR",
-          inventoryInitialized: true,
+          operation: "CONVERSATION",
+          inventoryInitialized,
+          pendingClarification: null,
         };
       }
-
-      // General conversation: respond naturally without mutating inventory
-      const conversationReply = await callLLM(messages, signal);
-      return {
-        content: conversationReply,
-        updatedInventory: currentInventory,
-        cbm: currentCbm,
-        storageRecommendation: currentRecommendation,
-        operation: "CONVERSATION",
-        inventoryInitialized,
-      };
+    } else {
+      resolvedOperation = intent;
+      nextInventoryInitialized = true;
+      nextPendingClarification = null;
     }
-  } else {
-    resolvedOperation = intent;
-    nextInventoryInitialized = true;
   }
 
   // 3. Apply validated deterministic mutation
   const updatedInventory = applyInventoryOperation(
     currentInventory,
-    resolvedOperation,
+    resolvedOperation
   );
 
   // 4. Deterministic CBM calculation
@@ -134,10 +180,10 @@ export async function processInventoryTurn(
     replyText = await callLLM(
       [{ id: `reply-${Date.now()}`, role: "user", content: userText }],
       signal,
-      { systemPrompt: verifiedSystemPrompt },
+      { systemPrompt: verifiedSystemPrompt }
     );
   } catch {
-    // Fallback in case of conversational call issue
+    // Fallback in case of conversational call issue (including AbortError)
     const sizeNote = storageRecommendation
       ? ` Based on the available prototype options, a ${storageRecommendation.capacityCbm} CBM storage unit would be the appropriate size.`
       : " There is no configured storage option large enough in this prototype.";
@@ -158,5 +204,6 @@ export async function processInventoryTurn(
     storageRecommendation,
     operation: resolvedOperation.operation,
     inventoryInitialized: nextInventoryInitialized,
+    pendingClarification: nextPendingClarification,
   };
 }
