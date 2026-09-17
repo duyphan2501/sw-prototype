@@ -1,0 +1,11 @@
+{
+  "name": "sw-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix stow run dev",
+    "build": "npm --prefix stow run build",
+    "start": "npm --prefix stow run start",
+    "lint": "npm --prefix stow run lint"
+  }
+}

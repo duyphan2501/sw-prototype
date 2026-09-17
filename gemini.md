@@ -1,396 +1,714 @@
-# MyStorage Inventory Cancellation Fix — Gemini.md
+# MyStorage Assignment — Prototype Master Context
 
-## 1. Project Context
+## 1. Assignment Goal
 
-This prototype investigates and fixes a black-box behavior observed in the MyStorage AI assistant:
+Build a small, working prototype that addresses the observed MyStorage Stow finding:
 
-> After an in-progress assistant response is cancelled, a subsequent inventory statement can retain stale previously mentioned inventory in the primary storage estimate.
+> After an assistant response is cancelled while generating, stale inventory/context can remain influential in the next inventory estimate.
 
-The finding was validated with an A/B control:
+The real Stow application is the **Before Fix evidence**.
 
-- Normal flow: initial full inventory → assistant completes → exact same new inventory statement → new inventory is treated as current.
-- Cancel flow: initial full inventory → assistant response is cancelled → exact same new inventory statement → previously mentioned inventory remains influential in the primary estimate.
-- Explicit modification control: an explicit instruction such as "Update my inventory. Remove..." is handled correctly.
+The prototype is the **proposed fixed flow**.
 
-The prototype must reproduce the behavioral distinction and demonstrate a safer state-management design.
+The prototype must demonstrate that:
 
-## 2. Core Engineering Principle
+1. cancelling an assistant response does not contaminate canonical inventory state;
+2. subsequent inventory messages are interpreted explicitly;
+3. valid `ADD`, `REMOVE`, and `REPLACE` behavior is preserved;
+4. the CBM calculation uses the resulting canonical inventory rather than stale generation context.
 
-Separate:
+Do not attempt to reproduce or claim knowledge of Stow's internal implementation.
 
-1. Conversation context
-2. Assistant response generation state
-3. Canonical business state (inventory)
+---
 
-A cancelled assistant response must not mutate canonical inventory and must not leave an uncommitted generation state that affects the next inventory assessment.
+# 2. Core Finding
 
-### Invariant
+The observed issue is not simply "the AI calculates CBM incorrectly."
 
-```text
-Cancelled assistant generation MUST NOT mutate canonical inventory state.
-```
-
-This is the primary invariant tested by the prototype.
-
-## 3. Technology
-
-Use a single Next.js application.
-
-- Next.js
-- TypeScript
-- App Router
-- React
-- API Route / Route Handler for server-side logic
-- Vitest for unit tests
-- No database required
-- No Redis required
-- In-memory/session state is sufficient for the prototype
-- Antigravity is the development environment
-- Gemini/LLM may be used only for intent extraction; deterministic application code owns state mutation
-
-Do not introduce unnecessary infrastructure.
-
-## 4. Architecture
+The important behavior is:
 
 ```text
-                    ┌─────────────────────┐
-                    │      Next.js UI     │
-                    │ Chat + Inventory UI │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │   Chat Route/Service│
-                    └──────────┬──────────┘
-                               │
-                 ┌─────────────┴─────────────┐
-                 │                           │
-                 ▼                           ▼
-       ┌───────────────────┐       ┌────────────────────┐
-       │ Generation State  │       │ Inventory Resolver │
-       │ temporary only    │       │ REPLACE/ADD/REMOVE │
-       └─────────┬─────────┘       │ /UNCLEAR           │
-                 │                 └─────────┬──────────┘
-                 │                           │
-          cancel/discard                     ▼
-                 │                 ┌────────────────────┐
-                 X                 │ Inventory State    │
-                                   │ Manager            │
-                                   └─────────┬──────────┘
-                                             │
-                                             ▼
-                                   ┌────────────────────┐
-                                   │ Canonical Inventory│
-                                   └─────────┬──────────┘
-                                             │
-                                             ▼
-                                   ┌────────────────────┐
-                                   │ Deterministic CBM  │
-                                   │ Calculator (mock)  │
-                                   └────────────────────┘
+Previous inventory
+       ↓
+Assistant response starts generating
+       ↓
+User cancels response
+       ↓
+Temporary/stale context remains influential
+       ↓
+User sends another inventory request
+       ↓
+Previous inventory can still influence the estimate
 ```
 
-## 5. Domain Model
+The exact internal cause is unknown.
 
-### InventoryItem
+Possible internal causes include frontend state, backend session state, context construction, or another implementation detail.
 
-```ts
-type InventoryItem = {
-  name: string;
-  quantity: number;
-};
+The prototype must therefore focus on the observable invariant rather than claim a specific production root cause.
+
+---
+
+# 3. Prototype Principle
+
+Keep the implementation deliberately small.
+
+The prototype is NOT a rebuilt version of Stow.
+
+It is a focused proof-of-concept for safer inventory state handling.
+
+### In scope
+
+* customer-facing chat UI;
+* real LLM interaction;
+* streaming assistant response;
+* real Cancel Response interaction;
+* structured inventory intent extraction;
+* deterministic inventory state mutation;
+* deterministic CBM calculation;
+* regression tests.
+
+### Out of scope
+
+* authentication;
+* database;
+* payment;
+* booking;
+* production integrations;
+* RAG;
+* agent orchestration;
+* complex tool calling;
+* full Stow UI recreation;
+* Before/After simulation inside the UI;
+* technical dashboard;
+* state matrix;
+* lifecycle visualization;
+* technical drawer;
+* analytics;
+* production deployment architecture.
+
+---
+
+# 4. Architecture
+
+Use a minimal architecture:
+
+```text
+                    ┌───────────────┐
+                    │   Chat UI     │
+                    └───────┬───────┘
+                            │
+                            ▼
+                    ┌───────────────┐
+                    │      LLM      │
+                    │ Intent + Text │
+                    └───────┬───────┘
+                            │
+                    structured intent
+                            │
+                            ▼
+                  ┌───────────────────┐
+                  │ Inventory State   │
+                  │ deterministic     │
+                  └─────────┬─────────┘
+                            │
+                  canonical inventory
+                            │
+                            ▼
+                  ┌───────────────────┐
+                  │  CBM Calculator   │
+                  │ deterministic     │
+                  └─────────┬─────────┘
+                            │
+                            ▼
+                         Estimate
+                            │
+                            ▼
+                           LLM
+                            │
+                       stream response
+                            │
+                            ▼
+                         Chat UI
 ```
 
-### InventoryIntent
+The LLM must NOT directly mutate business state.
+
+---
+
+# 5. State Model
+
+Only two state concepts are required.
+
+## canonicalInventory
+
+The authoritative business inventory.
 
 ```ts
-type InventoryIntent =
+canonicalInventory: InventoryItem[]
+```
+
+This is the only inventory state used by the calculator.
+
+## pendingGeneration
+
+Temporary state associated with the currently generating assistant response.
+
+```ts
+pendingGeneration: {
+  status: "generating" | "cancelled" | "completed"
+  ...
+} | null
+```
+
+Do not create unnecessary abstractions for conversation state, lifecycle state, policy state, etc.
+
+The prototype only needs enough state to demonstrate the invariant.
+
+---
+
+# 6. Cancellation Invariant
+
+The central invariant is:
+
+> Cancelling an assistant response must not allow temporary generation state to influence subsequent inventory processing.
+
+When the user clicks Cancel:
+
+```text
+active LLM stream
+       ↓
+Abort
+       ↓
+discard pendingGeneration
+       ↓
+canonicalInventory remains authoritative
+```
+
+Cancellation of the assistant response is NOT cancellation of a business action that has already been explicitly committed.
+
+Therefore:
+
+```text
+Cancel response ≠ rollback inventory
+```
+
+---
+
+# 7. LLM Responsibilities
+
+The prototype uses an actual LLM, but the LLM has a limited role.
+
+## LLM may
+
+### A. Extract structured inventory intent
+
+Example:
+
+User:
+
+> "Actually, I only want to store a queen-size bed and a three-seat sofa."
+
+LLM:
+
+```json
+{
+  "operation": "REPLACE",
+  "items": [
+    {
+      "name": "queen-size bed",
+      "quantity": 1
+    },
+    {
+      "name": "three-seat sofa",
+      "quantity": 1
+    }
+  ]
+}
+```
+
+### B. Generate the natural-language assistant response
+
+The response can be streamed to the UI.
+
+## LLM must NOT
+
+* directly mutate canonical inventory;
+* decide authoritative CBM;
+* directly merge old and new business state;
+* bypass validation;
+* determine final storage state through free-form text.
+
+The application code remains responsible for business state.
+
+---
+
+# 8. Inventory Operations
+
+Inventory updates must be explicit.
+
+Supported operations:
+
+```ts
+type InventoryOperation =
   | "REPLACE"
   | "ADD"
   | "REMOVE"
   | "UNCLEAR";
 ```
 
-### ResolvedInventoryIntent
+## REPLACE
 
-```ts
-type ResolvedInventoryIntent = {
-  intent: InventoryIntent;
-  items: InventoryItem[];
-  confidence?: number;
-  reason?: string;
-};
+Example:
+
+> "I only want to store 1 bed and 1 sofa."
+
+Result:
+
+```text
+old inventory
+      ↓
+REPLACE
+      ↓
+bed + sofa
 ```
 
-### Session State
+Old items not included in the replacement are removed from the resulting inventory.
+
+## ADD
+
+Example:
+
+> "Also add 10 boxes."
+
+Result:
+
+```text
+bed + sofa
+      ↓
+ADD 10 boxes
+      ↓
+bed + sofa + 10 boxes
+```
+
+This is an intentional merge and must remain supported.
+
+## REMOVE
+
+Example:
+
+> "Remove the wardrobe and all boxes."
+
+Result:
+
+```text
+bed + sofa + wardrobe + boxes
+      ↓
+REMOVE wardrobe + boxes
+      ↓
+bed + sofa
+```
+
+## UNCLEAR
+
+Example:
+
+> "I need to store a bed and sofa."
+
+If the system cannot determine whether the user intends to replace the existing inventory or add to it, it should not silently mutate state.
+
+It may ask for clarification.
+
+---
+
+# 9. Validation Boundary
+
+Use this pipeline:
+
+```text
+Natural language
+      ↓
+LLM structured intent
+      ↓
+Schema validation
+      ↓
+Deterministic inventory operation
+      ↓
+canonicalInventory
+      ↓
+CBM calculation
+      ↓
+LLM response
+```
+
+The LLM output is untrusted input.
+
+The application must validate the structured intent before applying it.
+
+---
+
+# 10. CBM Calculator
+
+Use a deterministic mock calculator.
+
+The purpose is to demonstrate the business consequence of stale inventory, not to reproduce MyStorage's internal pricing calculator.
+
+Example volume assumptions:
+
+```text
+queen-size bed           2.5 CBM
+three-seat sofa          2.0 CBM
+wardrobe                 1.5 CBM
+dining table + 4 chairs  2.0 CBM
+box                      0.1 CBM
+```
+
+The calculator must only receive:
+
+```ts
+canonicalInventory
+```
+
+It must never receive raw conversation history or stale generation context.
+
+---
+
+# 11. Cancellation / Streaming
+
+The Cancel Response button must perform a real cancellation of the active generation.
+
+Use an abort mechanism such as `AbortController`.
 
 Conceptually:
 
+```text
+Send
+ ↓
+start LLM stream
+ ↓
+display streamed response
+ ↓
+show "Cancel Response"
+ ↓
+user clicks Cancel
+ ↓
+abort active request
+ ↓
+discard pendingGeneration
+```
+
+Do not implement Cancel merely as:
+
 ```ts
-type SessionState = {
-  canonicalInventory: InventoryItem[];
-  generation?: {
-    id: string;
-    status: "GENERATING";
-    temporaryContext: unknown;
-  };
-};
+setGenerating(false)
 ```
 
-Do not persist cancelled generation state as canonical business state.
+while allowing the underlying generation to continue.
 
-## 6. Inventory Semantics
+---
 
-### REPLACE
+# 12. UI
 
-Example:
+The UI should resemble a simple customer-facing storage assistant.
 
-> I need to store 10 boxes and 1 queen-size bed.
+It should feel like a real chat product, not an engineering demo.
 
-Replace the previous inventory.
-
-### ADD
-
-Example:
-
-> Also add 5 boxes.
-
-Append/increment the requested items.
-
-### REMOVE
-
-Example:
-
-> Remove the wardrobe.
-
-Remove/decrement the requested items.
-
-### UNCLEAR
-
-Example:
-
-> I need to store 10 boxes and a sofa.
-
-When context makes both replacement and addition plausible, do not silently choose one if the prototype cannot establish the intended semantics.
-
-Ask:
-
-> Should I replace your previous inventory with these items, or add them to it?
-
-No state mutation occurs for UNCLEAR.
-
-## 7. Important Design Constraint
-
-Do NOT implement:
+### Required
 
 ```text
-Every inventory-looking message = REPLACE
+┌──────────────────────────────────────┐
+│ MyStorage Assistant                  │
+│                                      │
+│ User message                         │
+│                                      │
+│ Assistant response...                │
+│                                      │
+│        [ Cancel Response ]            │
+│                                      │
+│                                      │
+├──────────────────────────────────────┤
+│ Type your message...             Send│
+└──────────────────────────────────────┘
 ```
 
-That would fix the reproduced case while breaking legitimate additive updates.
+Required interactions:
 
-Do NOT implement:
+* send message;
+* streaming response;
+* Cancel Response while generating;
+* send another message after cancellation;
+* reset conversation.
+
+Do not add:
+
+* technical drawer;
+* debug panel;
+* lifecycle diagram;
+* state matrix;
+* scenario selector;
+* Before/After switch;
+* large status dashboard.
+
+The reviewer should be able to understand the prototype by using it as a customer.
+
+---
+
+# 13. Main Demonstration Flow
+
+The main demo should be:
 
 ```text
-Cancel = clear all conversation context
+1. Start with initial inventory.
+
+2. Send a message that produces an assistant response.
+
+3. While the response is generating,
+   click "Cancel Response".
+
+4. Send an explicit inventory update:
+
+   "I only want to store 1 queen-size bed
+    and 1 three-seat sofa."
+
+5. LLM extracts:
+
+   REPLACE [bed, sofa]
+
+6. Deterministic state layer updates
+   canonicalInventory.
+
+7. CBM calculator uses only the resulting inventory.
+
+8. Assistant returns the estimate.
 ```
 
-That would throw away useful conversational context.
-
-Instead:
+The expected state transition is:
 
 ```text
-Conversation context can survive.
-Uncommitted generation state cannot become canonical inventory.
-Inventory mutation requires explicit resolved semantics.
-```
-
-## 8. LLM Boundary
-
-If an LLM is used:
-
-```text
-User message
-    ↓
-LLM intent extraction
-    ↓
-Structured JSON
-    ↓
-Application validation
-    ↓
-Deterministic state mutation
-    ↓
-Canonical inventory
-```
-
-The LLM must not directly mutate application state.
-
-The application should validate:
-
-- allowed intent
-- valid item names
-- positive quantities
-- required fields
-- supported operation
-
-If LLM output is invalid, return a controlled clarification/fallback.
-
-## 9. Prototype Calculator
-
-The calculator is a deterministic demonstration component, NOT a claim about MyStorage's production calculation engine.
-
-Suggested values:
-
-```text
-queen-size bed        2.5 CBM
-three-seat sofa       2.0 CBM
-wardrobe              1.5 CBM
-dining table + chairs 2.0 CBM
-box                   0.1 CBM
-```
-
-The purpose is to make stale-state impact visible.
-
-Example:
-
-```text
-10 boxes + queen-size bed
-= 1.0 + 2.5
-= 3.5 CBM
-```
-
-## 10. UI Requirements
-
-Build a minimal but clear demo.
-
-Show:
-
-- Chat transcript
-- Cancel response button
-- Current canonical inventory
-- Estimated CBM
-- Current implementation mode: Before Fix / After Fix
-- Optional event/state log for demonstration
-
-The UI should make it obvious whether the inventory changed after cancellation.
-
-## 11. Before-Fix Simulation
-
-The prototype should include a controlled simulation of the observed bug.
-
-Before Fix:
-
-```text
-Initial inventory
-    ↓
-Assistant starts response
-    ↓
+initial inventory
+      ↓
+generation starts
+      ↓
 Cancel
-    ↓
-Next inventory message
-    ↓
-Stale previous inventory influences estimate
+      ↓
+generation discarded
+      ↓
+canonical inventory unaffected
+      ↓
+explicit REPLACE
+      ↓
+bed + sofa
+      ↓
+calculate CBM
 ```
 
-This is a reproduction model, not a claim that the prototype contains MyStorage's actual source code.
+---
 
-## 12. After-Fix Behavior
+# 14. Regression Cases
 
-After Fix:
+Keep regression tests small.
+
+### Test 1 — Normal completed response
 
 ```text
-Initial inventory
-    ↓
-Assistant starts response
-    ↓
-Cancel
-    ↓
-Canonical inventory remains unchanged
-    ↓
-Next inventory message
-    ↓
-Resolve intent
-    ↓
-Commit new canonical inventory
-    ↓
-Calculate estimate
+Send
+→ response completes
+→ next inventory request
+→ correct intended inventory is used
 ```
 
-## 13. What NOT to Build
-
-Do not build:
-
-- authentication
-- production database
-- payment
-- real booking
-- full MyStorage clone
-- production pricing engine
-- fine-tuned model
-- autonomous agent loop
-- unnecessary microservices
-- unnecessary state-management framework
-
-## 14. Testing Strategy
-
-Required tests:
-
-1. Normal replacement
-2. Cancelled generation does not mutate canonical inventory
-3. Explicit replacement
-4. ADD semantics
-5. REMOVE semantics
-6. UNCLEAR does not mutate state
-7. Calculator uses canonical inventory only
-
-The key regression test is:
+### Test 2 — Cancelled response
 
 ```text
-same initial inventory
-+
-same exact subsequent user message
-+
-only difference = response cancelled
+Send
+→ response starts
+→ Cancel
+→ next inventory request
+→ stale generation state cannot affect calculation
 ```
 
-The after-fix implementation must produce equivalent inventory semantics in both flows.
-
-## 15. AI Coding Workflow Requirement
-
-The assignment explicitly asks:
-
-> Tell us what Claude Code produced that you rejected or rewrote, and why.
-
-Even though development is done in Antigravity, preserve the same discipline:
-
-- Ask Gemini/AI to implement a bounded task.
-- Read every changed line.
-- Run tests.
-- Reject unsafe or over-broad implementation.
-- Rewrite when architecture or behavior is wrong.
-- Record important AI decisions in `docs/ai-review-log.md`.
-
-Do not claim code was manually written if AI generated it.
-
-The final report should contain concrete examples of:
+### Test 3 — Explicit REPLACE
 
 ```text
-AI suggestion
-→ Review
-→ Accepted / Rejected / Rewritten
-→ Technical reason
-→ Test/evidence
+existing inventory
+→ "I only want bed and sofa"
+→ result = bed + sofa
 ```
 
-## 16. Definition of Done
+### Test 4 — ADD / valid merge
 
-The prototype is complete when:
+```text
+existing inventory
+→ "Also add 10 boxes"
+→ existing inventory + 10 boxes
+```
 
-- `npm test` passes.
-- Normal flow works.
-- Cancel flow no longer causes stale canonical inventory.
-- ADD and REMOVE semantics work.
-- Ambiguous intent does not silently mutate state.
-- UI demonstrates before/after behavior.
-- README explains architecture and limitation.
-- AI review log documents rejected/rewritten AI-generated code.
+### Test 5 — REMOVE
+
+```text
+existing inventory
+→ "Remove the wardrobe"
+→ wardrobe absent
+```
+
+### Test 6 — UNCLEAR
+
+```text
+ambiguous inventory statement
+→ no silent destructive mutation
+→ clarification
+```
+
+---
+
+# 15. Production-Oriented Principle
+
+The prototype should demonstrate this boundary:
+
+```text
+LLM
+  = interpretation + communication
+
+Application logic
+  = validation + state mutation + calculation
+```
+
+This makes the behavior more predictable and testable.
+
+The LLM should not be the source of truth for business inventory.
+
+---
+
+# 16. Implementation Constraints
+
+Use:
+
+* Next.js;
+* TypeScript;
+* simple React components;
+* minimal dependencies;
+* deterministic unit tests.
+
+Avoid unnecessary design patterns.
+
+Do not introduce:
+
+* repository pattern;
+* service factory;
+* strategy hierarchy;
+* event bus;
+* state-machine framework;
+* database abstraction;
+* complex agent framework.
+
+Prefer straightforward functions and small modules.
+
+---
+
+# 17. Suggested Project Structure
+
+```text
+src/
+├── app/
+│   └── page.tsx
+│
+├── components/
+│   └── Chat.tsx
+│
+├── lib/
+│   ├── inventory.ts
+│   ├── parser.ts
+│   ├── calculator.ts
+│   └── llm.ts
+│
+└── types.ts
+
+tests/
+├── inventory.test.ts
+└── cancellation.test.ts
+```
+
+Keep the number of files small unless implementation needs otherwise.
+
+---
+
+# 18. What the Prototype Must NOT Claim
+
+Do not claim:
+
+* the exact backend root cause of Stow;
+* that MyStorage has a database corruption bug;
+* that Redis/session state is responsible;
+* that the LLM itself is definitely causing the behavior;
+* that the customer was actually overcharged;
+* that the prototype reproduces Stow's internal architecture.
+
+The correct framing is:
+
+> The behavior is reproducible through the customer-facing Stow interface. The prototype demonstrates a state-handling design that prevents cancelled response context from influencing subsequent inventory processing.
+
+---
+
+# 19. Build Priority
+
+Build in this order:
+
+```text
+1. Chat UI
+2. LLM streaming
+3. Real Cancel Response
+4. canonicalInventory
+5. deterministic inventory operations
+6. CBM calculator
+7. explicit intent extraction
+8. regression tests
+9. visual polish
+```
+
+Do not spend time on architecture documentation or UI components before the main interaction works.
+
+The critical path is:
+
+```text
+SEND
+  ↓
+STREAM
+  ↓
+CANCEL
+  ↓
+SEND NEXT INVENTORY UPDATE
+  ↓
+CORRECT STATE
+  ↓
+CORRECT CALCULATION
+```
+
+---
+
+# 20. Definition of Done
+
+The prototype is complete when a reviewer can:
+
+1. open the app;
+2. send a natural-language inventory request;
+3. see the assistant stream a response;
+4. click Cancel Response while it is generating;
+5. send an explicit inventory update;
+6. see that the cancelled response does not contaminate the new inventory state;
+7. test `REPLACE`, `ADD`, and `REMOVE`;
+8. see a deterministic CBM estimate based on the resulting inventory;
+9. run the regression tests successfully.
+
+The prototype should be small enough to explain in a few minutes and clear enough that the reviewer can immediately connect:
+
+```text
+REAL STOW FINDING
+       ↓
+STATE INVARIANT
+       ↓
+PROPOSED FIX
+       ↓
+WORKING PROTOTYPE
+       ↓
+REGRESSION TESTS
+```
