@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Message } from "@/types/chat";
 import ChatMessageList from "@/components/ChatMessageList";
 import ChatInput from "@/components/ChatInput";
@@ -20,9 +20,38 @@ export default function Chat() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const currentRequestIdRef = useRef<number>(0);
+
+  // Clean up any pending request when component unmounts
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  const handleCancelResponse = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsGenerating(false);
+    setError(null);
+  };
+
   const handleSendMessage = async (content: string) => {
     const trimmed = content.trim();
     if (!trimmed || isGenerating) return;
+
+    // Abort any lingering request before starting a new one
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    const requestId = ++currentRequestIdRef.current;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     const userMessage: Message = {
       id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -38,11 +67,17 @@ export default function Chat() {
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ messages: newMessages }),
       });
+
+      // Race protection: discard if superseded by a newer request or cancelled
+      if (requestId !== currentRequestIdRef.current) {
+        return;
+      }
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -50,6 +85,12 @@ export default function Chat() {
       }
 
       const data = await response.json();
+
+      // Double check race condition before appending assistant message
+      if (requestId !== currentRequestIdRef.current) {
+        return;
+      }
+
       const assistantMessage: Message = {
         id: `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         role: "assistant",
@@ -58,10 +99,27 @@ export default function Chat() {
 
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err: unknown) {
+      // Race protection: ignore obsolete requests
+      if (requestId !== currentRequestIdRef.current) {
+        return;
+      }
+
+      const isAbort =
+        (err instanceof Error && err.name === "AbortError") ||
+        controller.signal.aborted;
+
+      if (isAbort) {
+        // User cancellation is not an application error: do not display error banner
+        return;
+      }
+
       console.error("Chat error:", err);
       setError("Sorry, something went wrong. Please try again.");
     } finally {
-      setIsGenerating(false);
+      if (requestId === currentRequestIdRef.current) {
+        setIsGenerating(false);
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -72,7 +130,12 @@ export default function Chat() {
         isGenerating={isGenerating}
         error={error}
       />
-      <ChatInput onSendMessage={handleSendMessage} disabled={isGenerating} />
+      <ChatInput
+        onSendMessage={handleSendMessage}
+        disabled={isGenerating}
+        isGenerating={isGenerating}
+        onCancel={handleCancelResponse}
+      />
     </div>
   );
 }

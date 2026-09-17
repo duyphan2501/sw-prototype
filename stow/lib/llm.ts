@@ -5,17 +5,17 @@ const SYSTEM_PROMPT =
   "You assist customers in estimating their storage needs and discussing their items. " +
   "Keep your responses concise, helpful, and polite.";
 
-export async function callLLM(messages: Message[]): Promise<string> {
+export async function callLLM(messages: Message[], signal?: AbortSignal): Promise<string> {
   const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
   const openaiApiKey = process.env.OPENAI_API_KEY?.trim();
   const modelGeminiName = process.env.MODEL_GEMINI_NAME?.trim() || "gemini-3.5-flash-lite";
 
   if (geminiApiKey) {
-    return callGemini(messages, geminiApiKey, modelGeminiName);
+    return callGemini(messages, geminiApiKey, modelGeminiName, signal);
   }
 
   if (openaiApiKey) {
-    return callOpenAI(messages, openaiApiKey);
+    return callOpenAI(messages, openaiApiKey, signal);
   }
 
   throw new Error(
@@ -23,7 +23,12 @@ export async function callLLM(messages: Message[]): Promise<string> {
   );
 }
 
-async function callGemini(messages: Message[], apiKey: string, modelName: string): Promise<string> {
+async function callGemini(
+  messages: Message[],
+  apiKey: string,
+  modelName: string,
+  signal?: AbortSignal
+): Promise<string> {
   // Format contents according to Gemini API specification
   // Filter out empty messages if any
   const contents = messages
@@ -37,6 +42,7 @@ async function callGemini(messages: Message[], apiKey: string, modelName: string
 
   const response = await fetch(url, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
     },
@@ -66,7 +72,11 @@ async function callGemini(messages: Message[], apiKey: string, modelName: string
   return candidateText.trim();
 }
 
-async function callOpenAI(messages: Message[], apiKey: string): Promise<string> {
+async function callOpenAI(
+  messages: Message[],
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<string> {
   const formattedMessages = [
     { role: "system", content: SYSTEM_PROMPT },
     ...messages
@@ -79,6 +89,7 @@ async function callOpenAI(messages: Message[], apiKey: string): Promise<string> 
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,

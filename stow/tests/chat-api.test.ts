@@ -5,6 +5,7 @@ import { Message } from "../types/chat";
 
 describe("Chat API & LLM Integration", () => {
   const originalEnv = process.env;
+  const originalFetch = global.fetch;
 
   beforeEach(() => {
     vi.resetModules();
@@ -13,6 +14,7 @@ describe("Chat API & LLM Integration", () => {
 
   afterEach(() => {
     process.env = originalEnv;
+    global.fetch = originalFetch;
     vi.restoreAllMocks();
   });
 
@@ -133,6 +135,55 @@ describe("Chat API & LLM Integration", () => {
           }),
         })
       );
+    });
+  });
+
+  describe("Cancellation & AbortSignal", () => {
+    it("passes AbortSignal to underlying fetch", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+
+      const controller = new AbortController();
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: "response" }] } }],
+        }),
+      } as unknown as Response);
+
+      const messages: Message[] = [
+        { id: "1", role: "user", content: "Hello" },
+      ];
+
+      await callLLM(messages, controller.signal);
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          signal: controller.signal,
+        })
+      );
+    });
+
+    it("handles aborted request in route handler cleanly without 500", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+
+      const controller = new AbortController();
+      controller.abort();
+
+      const messages: Message[] = [
+        { id: "1", role: "user", content: "Hello" },
+      ];
+
+      const req = new Request("http://localhost:3000/api/chat", {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(499);
     });
   });
 });
