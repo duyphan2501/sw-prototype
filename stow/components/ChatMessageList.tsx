@@ -5,15 +5,21 @@ import { Message } from "@/types/chat";
 
 interface ChatMessageListProps {
   messages: Message[];
+  isGenerating?: boolean;
+  error?: string | null;
 }
 
-export default function ChatMessageList({ messages }: ChatMessageListProps) {
+export default function ChatMessageList({
+  messages,
+  isGenerating = false,
+  error = null,
+}: ChatMessageListProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom whenever messages change
+  // Auto-scroll to bottom whenever messages, thinking state, or errors change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, isGenerating, error]);
 
   const hasUserMessages = messages.some((m) => m.role === "user");
 
@@ -51,6 +57,37 @@ export default function ChatMessageList({ messages }: ChatMessageListProps) {
           </div>
         );
       })}
+
+      {/* AI is thinking... state */}
+      {isGenerating && (
+        <div
+          id="ai-thinking-state"
+          className="flex flex-col items-start animate-fade-in"
+        >
+          <div className="text-xs font-medium text-slate-400 mb-1 px-1">
+            Assistant
+          </div>
+          <div className="max-w-[85%] sm:max-w-[75%] rounded-2xl rounded-tl-xs px-4 py-3 text-sm sm:text-base bg-slate-100 text-slate-500 border border-slate-200/60 italic flex items-center gap-2">
+            <span>AI is thinking...</span>
+            <span className="inline-flex gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-pulse" />
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-pulse delay-150" />
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-pulse delay-300" />
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* User-facing error message */}
+      {error && (
+        <div
+          id="chat-error-message"
+          className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs sm:text-sm text-center"
+        >
+          {error}
+        </div>
+      )}
+
       <div ref={messagesEndRef} />
     </div>
   );

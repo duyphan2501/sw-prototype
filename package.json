@@ -6,6 +6,7 @@
     "dev": "npm --prefix stow run dev",
     "build": "npm --prefix stow run build",
     "start": "npm --prefix stow run start",
-    "lint": "npm --prefix stow run lint"
+    "lint": "npm --prefix stow run lint",
+    "test": "npm --prefix stow run test"
   }
 }
