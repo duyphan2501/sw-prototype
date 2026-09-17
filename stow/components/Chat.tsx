@@ -2,6 +2,8 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Message } from "@/types/chat";
+import { InventoryItem } from "@/types/inventory";
+import { INITIAL_CANONICAL_INVENTORY } from "@/lib/inventory";
 import ChatMessageList from "@/components/ChatMessageList";
 import ChatInput from "@/components/ChatInput";
 
@@ -17,6 +19,9 @@ const INITIAL_MESSAGES: Message[] = [
 
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
+  const [canonicalInventory, setCanonicalInventory] = useState<InventoryItem[]>(
+    INITIAL_CANONICAL_INVENTORY
+  );
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,7 +76,10 @@ export default function Chat() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ messages: newMessages }),
+        body: JSON.stringify({
+          messages: newMessages,
+          currentInventory: canonicalInventory,
+        }),
       });
 
       // Race protection: discard if superseded by a newer request or cancelled
@@ -86,9 +94,14 @@ export default function Chat() {
 
       const data = await response.json();
 
-      // Double check race condition before appending assistant message
+      // Double check race condition before updating state
       if (requestId !== currentRequestIdRef.current) {
         return;
+      }
+
+      // Update canonical inventory only upon verified completed response
+      if (data.updatedInventory && Array.isArray(data.updatedInventory)) {
+        setCanonicalInventory(data.updatedInventory);
       }
 
       const assistantMessage: Message = {

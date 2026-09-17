@@ -9,7 +9,22 @@ Allowed operations:
 - "REPLACE": Use when the customer explicitly indicates that the listed items should replace all inventory or become their entire inventory (e.g., "I only want to store...", "Forget the other items, I only need...", "My inventory is now...").
 - "ADD": Use when the customer explicitly asks to add items while keeping existing inventory (e.g., "Also add...", "I want to add another...", "Keep everything and add...").
 - "REMOVE": Use when the customer explicitly asks to remove or take out items (e.g., "Remove the...", "Take out the...").
-- "UNCLEAR": Use when the message mentions items but does not clearly specify whether to replace, add, or remove (e.g., "What about a sofa and boxes?", "I need a sofa and some boxes"). For UNCLEAR, items MUST be an empty array [].
+- "UNCLEAR":
+  - Use when the user mentions inventory items but does not clearly specify whether they want to ADD, REPLACE, or REMOVE them.
+  - IMPORTANT: UNCLEAR means the operation is unclear, NOT that the items are unclear.
+  - If the mentioned items can be identified, ALWAYS include them in "items".
+  - Example:
+    User: "I need to store a queen-size bed and a three-seat sofa."
+    Output:
+    {
+      "operation": "UNCLEAR",
+      "items": [
+        { "type": "queen_bed", "quantity": 1 },
+        { "type": "three_seat_sofa", "quantity": 1 }
+      ]
+    }
+  - Do NOT return an empty items array merely because the operation is UNCLEAR.
+  - Return an empty items array only when no supported inventory items can be identified.
 
 Allowed item types:
 - "queen_bed" (e.g., queen-size bed, queen bed)

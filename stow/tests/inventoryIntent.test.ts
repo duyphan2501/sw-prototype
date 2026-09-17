@@ -64,7 +64,26 @@ describe("Phase 07 — LLM Structured Inventory Intent", () => {
       });
     });
 
-    it("validates an UNCLEAR intent with empty items", () => {
+    it("validates an UNCLEAR intent with identified items", () => {
+      const raw = JSON.stringify({
+        operation: "UNCLEAR",
+        items: [
+          { type: "queen_bed", quantity: 1 },
+          { type: "three_seat_sofa", quantity: 1 },
+        ],
+      });
+
+      const intent = validateInventoryIntent(raw);
+      expect(intent).toEqual({
+        operation: "UNCLEAR",
+        items: [
+          { type: "queen_bed", quantity: 1 },
+          { type: "three_seat_sofa", quantity: 1 },
+        ],
+      });
+    });
+
+    it("validates an UNCLEAR intent with empty items when no supported items identified", () => {
       const raw = JSON.stringify({
         operation: "UNCLEAR",
         items: [],
@@ -274,7 +293,48 @@ describe("Phase 07 — LLM Structured Inventory Intent", () => {
       });
     });
 
-    it("returns UNCLEAR for ambiguous request 'What about a sofa and some boxes?'", async () => {
+    it("returns UNCLEAR with identified items for 'I need to store a queen-size bed and a three-seat sofa.'", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+
+      const mockLlmResponse = {
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    operation: "UNCLEAR",
+                    items: [
+                      { type: "queen_bed", quantity: 1 },
+                      { type: "three_seat_sofa", quantity: 1 },
+                    ],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      };
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => mockLlmResponse,
+      } as unknown as Response);
+
+      const result = await extractInventoryIntent(
+        "I need to store a queen-size bed and a three-seat sofa."
+      );
+
+      expect(result).toEqual({
+        operation: "UNCLEAR",
+        items: [
+          { type: "queen_bed", quantity: 1 },
+          { type: "three_seat_sofa", quantity: 1 },
+        ],
+      });
+    });
+
+    it("returns UNCLEAR with empty items when no supported items can be identified", async () => {
       process.env.GEMINI_API_KEY = "test-gemini-key";
 
       const mockLlmResponse = {
@@ -299,9 +359,7 @@ describe("Phase 07 — LLM Structured Inventory Intent", () => {
         json: async () => mockLlmResponse,
       } as unknown as Response);
 
-      const result = await extractInventoryIntent(
-        "What about a sofa and some boxes?"
-      );
+      const result = await extractInventoryIntent("Can you help me?");
 
       expect(result).toEqual({
         operation: "UNCLEAR",

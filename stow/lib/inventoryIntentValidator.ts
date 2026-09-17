@@ -28,26 +28,29 @@ export function validateInventoryIntent(raw: unknown): InventoryIntent {
 
   const operation = candidate.operation.toUpperCase();
 
-  if (operation === "UNCLEAR") {
-    return {
-      operation: "UNCLEAR",
-      items: [],
-    };
-  }
-
-  if (operation !== "REPLACE" && operation !== "ADD" && operation !== "REMOVE") {
+  if (
+    operation !== "REPLACE" &&
+    operation !== "ADD" &&
+    operation !== "REMOVE" &&
+    operation !== "UNCLEAR"
+  ) {
     throw new Error(
       `Unsupported inventory intent operation: "${candidate.operation}". Must be REPLACE, ADD, REMOVE, or UNCLEAR.`
     );
   }
 
-  if (!Array.isArray(candidate.items)) {
+  if (candidate.items !== undefined && !Array.isArray(candidate.items)) {
     throw new Error("Invalid inventory intent: items field must be an array.");
   }
 
+  if (operation !== "UNCLEAR" && !Array.isArray(candidate.items)) {
+    throw new Error("Invalid inventory intent: items field must be an array.");
+  }
+
+  const itemsList = Array.isArray(candidate.items) ? candidate.items : [];
   const validatedItems: InventoryItem[] = [];
 
-  for (const item of candidate.items) {
+  for (const item of itemsList) {
     validateInventoryItem(item as InventoryItem);
     validatedItems.push({
       type: item.type,

@@ -25,12 +25,10 @@ export type InventoryOperation =
     };
 
 export type InventoryIntent =
-  | {
-      operation: "REPLACE" | "ADD" | "REMOVE";
-      items: InventoryItem[];
-    }
+  | InventoryOperation
   | {
       operation: "UNCLEAR";
-      items: [];
+      items: InventoryItem[];
     };
+
 

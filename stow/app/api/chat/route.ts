@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
-import { callLLM } from "@/lib/llm";
 import { Message } from "@/types/chat";
+import { InventoryItem } from "@/types/inventory";
+import { INITIAL_CANONICAL_INVENTORY } from "@/lib/inventory";
+import { processInventoryTurn } from "@/lib/inventoryFlow";
 
 export async function POST(req: Request) {
   if (req.signal.aborted) {
@@ -9,7 +11,10 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
-    const { messages } = body as { messages?: Message[] };
+    const { messages, currentInventory } = body as {
+      messages?: Message[];
+      currentInventory?: InventoryItem[];
+    };
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json(
@@ -18,7 +23,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const assistantContent = await callLLM(messages, req.signal);
+    const inventoryToUse = currentInventory || INITIAL_CANONICAL_INVENTORY;
+    const result = await processInventoryTurn(messages, inventoryToUse, req.signal);
 
     if (req.signal.aborted) {
       return new Response(null, { status: 499 });
@@ -26,7 +32,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       role: "assistant",
-      content: assistantContent,
+      content: result.content,
+      updatedInventory: result.updatedInventory,
+      cbm: result.cbm,
     });
   } catch (error: unknown) {
     if (
