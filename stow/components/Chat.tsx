@@ -22,6 +22,8 @@ export default function Chat() {
   const [canonicalInventory, setCanonicalInventory] = useState<InventoryItem[]>(
     INITIAL_CANONICAL_INVENTORY
   );
+  const [inventoryInitialized, setInventoryInitialized] =
+    useState<boolean>(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,6 +81,7 @@ export default function Chat() {
         body: JSON.stringify({
           messages: newMessages,
           currentInventory: canonicalInventory,
+          inventoryInitialized,
         }),
       });
 
@@ -102,6 +105,10 @@ export default function Chat() {
       // Update canonical inventory only upon verified completed response
       if (data.updatedInventory && Array.isArray(data.updatedInventory)) {
         setCanonicalInventory(data.updatedInventory);
+      }
+
+      if (typeof data.inventoryInitialized === "boolean") {
+        setInventoryInitialized(data.inventoryInitialized);
       }
 
       const assistantMessage: Message = {

@@ -276,13 +276,107 @@ describe("Phase 08 — Inventory + CBM Integration Flow", () => {
       },
     ];
 
-    const result = await processInventoryTurn(messages, startingInventory);
+    const result = await processInventoryTurn(
+      messages,
+      startingInventory,
+      undefined,
+      true // inventoryInitialized = true
+    );
 
     expect(result.operation).toBe("UNCLEAR");
     expect(result.content).toMatch(/add.*replace/i);
     // Inventory is unchanged
     expect(result.updatedInventory).toEqual(startingInventory);
     expect(JSON.stringify(startingInventory)).toBe(initialSnapshot);
+    expect(result.inventoryInitialized).toBe(true);
+  });
+
+  it("Test 4b — UNCLEAR with inventoryInitialized = false: initializes inventory (REPLACE) without asking clarification even if currentInventory is non-empty", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+
+    // Non-empty starting inventory (e.g. prototype seed items)
+    const startingInventory: InventoryItem[] = [
+      { type: "wardrobe", quantity: 1 },
+      { type: "box", quantity: 10 },
+    ];
+
+    const mockIntentResponse = {
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: JSON.stringify({
+                  operation: "UNCLEAR",
+                  items: [
+                    { type: "queen_bed", quantity: 1 },
+                    { type: "three_seat_sofa", quantity: 1 },
+                  ],
+                }),
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const mockReplyResponse = {
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: "Got it! I've set up your inventory with 1 queen-size bed and 1 three-seat sofa. That's approximately 3.5 CBM. A 5 CBM Medium storage unit would be the appropriate size.",
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockIntentResponse,
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockReplyResponse,
+      } as unknown as Response);
+
+    const messages: Message[] = [
+      {
+        id: "1",
+        role: "user",
+        content: "I need to store a queen-size bed and a three-seat sofa.",
+      },
+    ];
+
+    const result = await processInventoryTurn(
+      messages,
+      startingInventory,
+      undefined,
+      false // inventoryInitialized = false
+    );
+
+    // Must NOT ask whether to add or replace
+    expect(result.content).not.toMatch(/add.*replace/i);
+    // Must treat as initializing the inventory (REPLACE)
+    expect(result.operation).toBe("REPLACE");
+    // Must apply identified items as canonical inventory (overwriting previous seed inventory)
+    expect(result.updatedInventory).toEqual([
+      { type: "queen_bed", quantity: 1 },
+      { type: "three_seat_sofa", quantity: 1 },
+    ]);
+    // Queen bed (1.5) + three seat sofa (2.0) = 3.5 CBM
+    expect(result.cbm).toBe(3.5);
+    expect(result.storageRecommendation).toEqual({
+      id: "medium",
+      label: "Medium storage unit",
+      capacityCbm: 5,
+    });
+    expect(result.inventoryInitialized).toBe(true);
   });
 
   it("Test 5 — Invalid Intent: Malformed LLM output does NOT mutate inventory", async () => {

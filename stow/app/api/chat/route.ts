@@ -11,9 +11,10 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
-    const { messages, currentInventory } = body as {
+    const { messages, currentInventory, inventoryInitialized } = body as {
       messages?: Message[];
       currentInventory?: InventoryItem[];
+      inventoryInitialized?: boolean;
     };
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
@@ -24,7 +25,12 @@ export async function POST(req: Request) {
     }
 
     const inventoryToUse = currentInventory || INITIAL_CANONICAL_INVENTORY;
-    const result = await processInventoryTurn(messages, inventoryToUse, req.signal);
+    const result = await processInventoryTurn(
+      messages,
+      inventoryToUse,
+      req.signal,
+      inventoryInitialized ?? false
+    );
 
     if (req.signal.aborted) {
       return new Response(null, { status: 499 });
@@ -35,6 +41,8 @@ export async function POST(req: Request) {
       content: result.content,
       updatedInventory: result.updatedInventory,
       cbm: result.cbm,
+      storageRecommendation: result.storageRecommendation,
+      inventoryInitialized: result.inventoryInitialized,
     });
   } catch (error: unknown) {
     if (

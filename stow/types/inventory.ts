@@ -31,4 +31,11 @@ export type InventoryIntent =
       items: InventoryItem[];
     };
 
+export interface StorageRecommendation {
+  id: string;
+  label: string;
+  capacityCbm: number;
+}
+
+
 

@@ -1,6 +1,12 @@
-import { InventoryItem, InventoryItemType } from "@/types/inventory";
+import {
+  InventoryItem,
+  InventoryItemType,
+  InventoryOperation,
+  StorageRecommendation,
+} from "@/types/inventory";
 import { applyInventoryOperation } from "@/lib/inventory";
 import { calculateCbm } from "@/lib/calculator";
+import { recommendStorageUnit } from "@/lib/storageRecommendation";
 import { extractInventoryIntent } from "@/lib/inventoryIntent";
 import { callLLM } from "@/lib/llm";
 import { Message } from "@/types/chat";
@@ -9,7 +15,9 @@ export interface InventoryFlowResult {
   content: string;
   updatedInventory: InventoryItem[];
   cbm: number;
+  storageRecommendation: StorageRecommendation | null;
   operation: "REPLACE" | "ADD" | "REMOVE" | "UNCLEAR" | "CONVERSATION";
+  inventoryInitialized: boolean;
 }
 
 const ITEM_DISPLAY_NAMES: Record<InventoryItemType, string> = {
@@ -34,7 +42,8 @@ export function formatInventorySummary(items: InventoryItem[]): string {
 export async function processInventoryTurn(
   messages: Message[],
   currentInventory: InventoryItem[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  inventoryInitialized: boolean = false
 ): Promise<InventoryFlowResult> {
   const latestMessage = messages[messages.length - 1];
   const userText = latestMessage?.content || "";
@@ -42,64 +51,103 @@ export async function processInventoryTurn(
   // 1. Extract structured intent via LLM
   const intent = await extractInventoryIntent(userText, signal);
 
-  // 2. Handle UNCLEAR or non-inventory requests
-  if (intent.operation === "UNCLEAR") {
-    const currentCbm = calculateCbm(currentInventory);
+  // 2. Resolve operation considering canonical inventory state
+  let resolvedOperation: InventoryOperation;
+  let nextInventoryInitialized = inventoryInitialized;
 
-    if (intent.items && intent.items.length > 0) {
-      const itemsSummary = formatInventorySummary(intent.items);
+  if (intent.operation === "UNCLEAR") {
+    // If inventory has not been initialized yet and the user provides identifiable inventory items:
+    // - Do not ask whether to ADD or REPLACE.
+    // - Treat the request as initializing the inventory (REPLACE).
+    // - Apply the identified items as the canonical inventory.
+    if (intent.items && intent.items.length > 0 && !inventoryInitialized) {
+      resolvedOperation = {
+        operation: "REPLACE",
+        items: intent.items,
+      };
+      nextInventoryInitialized = true;
+    } else {
+      const currentCbm = calculateCbm(currentInventory);
+      const currentRecommendation = recommendStorageUnit(currentCbm);
+
+      if (intent.items && intent.items.length > 0) {
+        const itemsSummary = formatInventorySummary(intent.items);
+        return {
+          content: `Would you like me to add ${itemsSummary} to your current inventory, or replace your current inventory with those items?`,
+          updatedInventory: currentInventory,
+          cbm: currentCbm,
+          storageRecommendation: currentRecommendation,
+          operation: "UNCLEAR",
+          inventoryInitialized: true,
+        };
+      }
+
+      // General conversation: respond naturally without mutating inventory
+      const conversationReply = await callLLM(messages, signal);
       return {
-        content: `Would you like me to add ${itemsSummary} to your current inventory, or replace your current inventory with those items?`,
+        content: conversationReply,
         updatedInventory: currentInventory,
         cbm: currentCbm,
-        operation: "UNCLEAR",
+        storageRecommendation: currentRecommendation,
+        operation: "CONVERSATION",
+        inventoryInitialized,
       };
     }
-
-    // General conversation: respond naturally without mutating inventory
-    const conversationReply = await callLLM(messages, signal);
-    return {
-      content: conversationReply,
-      updatedInventory: currentInventory,
-      cbm: currentCbm,
-      operation: "CONVERSATION",
-    };
+  } else {
+    resolvedOperation = intent;
+    nextInventoryInitialized = true;
   }
 
   // 3. Apply validated deterministic mutation
-  const updatedInventory = applyInventoryOperation(currentInventory, intent);
+  const updatedInventory = applyInventoryOperation(
+    currentInventory,
+    resolvedOperation,
+  );
 
   // 4. Deterministic CBM calculation
   const cbm = calculateCbm(updatedInventory);
 
-  // 5. Generate concise, verified customer response
+  // 5. Deterministic Storage Recommendation
+  const storageRecommendation = recommendStorageUnit(cbm);
+
+  // 6. Generate concise, verified customer response
   const summary = formatInventorySummary(updatedInventory);
+
+  const recommendationClause = storageRecommendation
+    ? `Based on the available prototype options, a ${storageRecommendation.capacityCbm} CBM storage unit (${storageRecommendation.label}) would be the appropriate size.`
+    : "There is no configured storage option large enough in this prototype.";
 
   const verifiedSystemPrompt =
     "You are MyStorage Assistant. The system has deterministically updated the customer's inventory.\n" +
-    `Operation performed: ${intent.operation}\n` +
+    `Operation performed: ${resolvedOperation.operation}\n` +
     `Updated inventory: ${summary}\n` +
-    `Verified volume: ${cbm} CBM\n\n` +
+    `Verified volume: ${cbm} CBM\n` +
+    `Verified storage recommendation: ${recommendationClause}\n\n` +
     "Instructions for your response:\n" +
     "1. Confirm the update in a brief, friendly customer-facing sentence.\n" +
-    `2. Clearly state that the estimated volume is approximately ${cbm} CBM based on prototype volume estimates.\n` +
-    "3. CRITICAL: DO NOT recommend, calculate, or hallucinate any storage unit size (e.g. NEVER mention 10x10, 5x5, 100 sq ft, 50 sq ft, etc.). Stop at the verified CBM.";
+    `2. Clearly state that the estimated volume is approximately ${cbm} CBM.\n` +
+    `3. State the verified storage recommendation: "${recommendationClause}".\n` +
+    "4. CRITICAL: DO NOT recommend, calculate, or hallucinate any other storage unit size or dimensions (e.g. NEVER mention 10x10, 5x5, 100 sq ft, 50 sq ft, etc.). Use only the verified recommendation above.";
 
   let replyText = "";
   try {
     replyText = await callLLM(
       [{ id: `reply-${Date.now()}`, role: "user", content: userText }],
       signal,
-      { systemPrompt: verifiedSystemPrompt }
+      { systemPrompt: verifiedSystemPrompt },
     );
   } catch {
     // Fallback in case of conversational call issue
-    if (intent.operation === "REPLACE") {
-      replyText = `Got it. I’ve updated your inventory to ${summary}. That’s approximately ${cbm} CBM based on our prototype volume estimates.`;
-    } else if (intent.operation === "ADD") {
-      replyText = `Got it. I’ve added the items. Your current inventory is now ${summary} (approximately ${cbm} CBM).`;
+    const sizeNote = storageRecommendation
+      ? ` Based on the available prototype options, a ${storageRecommendation.capacityCbm} CBM storage unit would be the appropriate size.`
+      : " There is no configured storage option large enough in this prototype.";
+
+    if (resolvedOperation.operation === "REPLACE") {
+      replyText = `Got it. I’ve updated your inventory to ${summary}. That’s approximately ${cbm} CBM.${sizeNote}`;
+    } else if (resolvedOperation.operation === "ADD") {
+      replyText = `Got it. I’ve added the items. Your current inventory is now ${summary} (approximately ${cbm} CBM).${sizeNote}`;
     } else {
-      replyText = `Got it. I’ve removed the requested items. Your updated inventory is ${summary} (approximately ${cbm} CBM).`;
+      replyText = `Got it. I’ve removed the requested items. Your updated inventory is ${summary} (approximately ${cbm} CBM).${sizeNote}`;
     }
   }
 
@@ -107,6 +155,8 @@ export async function processInventoryTurn(
     content: replyText,
     updatedInventory,
     cbm,
-    operation: intent.operation,
+    storageRecommendation,
+    operation: resolvedOperation.operation,
+    inventoryInitialized: nextInventoryInitialized,
   };
 }
