@@ -5,17 +5,26 @@ const SYSTEM_PROMPT =
   "You assist customers in estimating their storage needs and discussing their items. " +
   "Keep your responses concise, helpful, and polite.";
 
-export async function callLLM(messages: Message[], signal?: AbortSignal): Promise<string> {
+export interface LLMOptions {
+  systemPrompt?: string;
+  jsonMode?: boolean;
+}
+
+export async function callLLM(
+  messages: Message[],
+  signal?: AbortSignal,
+  options?: LLMOptions
+): Promise<string> {
   const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
   const openaiApiKey = process.env.OPENAI_API_KEY?.trim();
   const modelGeminiName = process.env.MODEL_GEMINI_NAME?.trim() || "gemini-3.5-flash-lite";
 
   if (geminiApiKey) {
-    return callGemini(messages, geminiApiKey, modelGeminiName, signal);
+    return callGemini(messages, geminiApiKey, modelGeminiName, signal, options);
   }
 
   if (openaiApiKey) {
-    return callOpenAI(messages, openaiApiKey, signal);
+    return callOpenAI(messages, openaiApiKey, signal, options);
   }
 
   throw new Error(
@@ -27,7 +36,8 @@ async function callGemini(
   messages: Message[],
   apiKey: string,
   modelName: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: LLMOptions
 ): Promise<string> {
   // Format contents according to Gemini API specification
   // Filter out empty messages if any
@@ -40,18 +50,27 @@ async function callGemini(
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
+  const systemPrompt = options?.systemPrompt || SYSTEM_PROMPT;
+  const requestBody: Record<string, unknown> = {
+    systemInstruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    contents,
+  };
+
+  if (options?.jsonMode) {
+    requestBody.generationConfig = {
+      responseMimeType: "application/json",
+    };
+  }
+
   const response = await fetch(url, {
     method: "POST",
     signal,
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [{ text: SYSTEM_PROMPT }],
-      },
-      contents,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -75,10 +94,12 @@ async function callGemini(
 async function callOpenAI(
   messages: Message[],
   apiKey: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: LLMOptions
 ): Promise<string> {
+  const systemPrompt = options?.systemPrompt || SYSTEM_PROMPT;
   const formattedMessages = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     ...messages
       .filter((m) => m.content.trim().length > 0)
       .map((m) => ({
@@ -87,6 +108,15 @@ async function callOpenAI(
       })),
   ];
 
+  const requestBody: Record<string, unknown> = {
+    model: "gpt-4o-mini",
+    messages: formattedMessages,
+  };
+
+  if (options?.jsonMode) {
+    requestBody.response_format = { type: "json_object" };
+  }
+
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     signal,
@@ -94,10 +124,7 @@ async function callOpenAI(
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: formattedMessages,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {

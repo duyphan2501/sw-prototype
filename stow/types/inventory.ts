@@ -23,3 +23,14 @@ export type InventoryOperation =
       operation: "REMOVE";
       items: InventoryItem[];
     };
+
+export type InventoryIntent =
+  | {
+      operation: "REPLACE" | "ADD" | "REMOVE";
+      items: InventoryItem[];
+    }
+  | {
+      operation: "UNCLEAR";
+      items: [];
+    };
+
