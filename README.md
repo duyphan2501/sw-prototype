@@ -1,62 +1,88 @@
-# MyStorage Inventory Cancellation Fix Prototype
-
-A minimal Next.js prototype investigating a stale-inventory behavior observed in the MyStorage AI assistant after an in-progress response is cancelled.
-
-## Core finding
-
-After cancellation, a subsequent inventory statement can retain influence from previously mentioned inventory, unlike the equivalent normal flow.
-
-## Core fix
-
-Separate:
-
-- conversation context
-- temporary response-generation state
-- canonical inventory state
-
-Invariant:
-
-> Cancelled assistant generation must never mutate canonical inventory.
-
 ## Architecture
 
 ```text
 User
  ↓
-Next.js UI
+Next.js UI (Chat + Real Response Cancellation)
  ↓
-Intent Resolver
+LLM Intent Extractor
  ↓
 Validation
  ↓
-Deterministic Inventory State Manager
+Deterministic Inventory Mutation (REPLACE / ADD / REMOVE)
  ↓
 Canonical Inventory
  ↓
-CBM Calculator
+Deterministic CBM Calculator
+ ↓
+Deterministic Storage Recommendation
+ ↓
+Verified Customer Response
 ```
 
-## Development
+## How to Run This Project
+
+### Prerequisites
+
+- **Node.js**: v18.18+ or v20+ recommended
+- **npm**: v9+
+- **LLM API Key**: Google Gemini API key (`GEMINI_API_KEY`);
+
+### 1. Installation
+
+From the repository root:
 
 ```bash
-npm install
+npm --prefix stow install
+```
+
+*(Alternatively: `cd stow && npm install`)*
+
+### 2. Environment Configuration
+
+Copy the example environment file in the `stow` directory:
+
+```bash
+# On Linux / macOS:
+cp stow/.env.example stow/.env
+
+# On Windows (PowerShell / cmd):
+copy stow\.env.example stow\.env
+```
+
+Open `stow/.env` and set your API key:
+
+```env
+# Google Gemini 
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+### 3. Running the Development Server
+
+From the repository root:
+
+```bash
 npm run dev
 ```
 
-Run tests:
+Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+### 4. Running Tests & Code Quality
+
+Run the comprehensive test suite (all unit and end-to-end validation tests):
 
 ```bash
 npm test
 ```
 
-## AI-assisted development
+Run ESLint:
 
-Development uses Antigravity and AI coding assistance.
+```bash
+npm run lint
+```
 
-Every AI-generated change is reviewed line-by-line. Important accepted, rejected, and rewritten changes are recorded in:
+Run TypeScript typecheck:
 
-`docs/phase-05-ai-review.md`
-
-## Prototype limitation
-
-This is a behavioral reproduction and engineering prototype. It does not claim to reproduce MyStorage's internal production implementation or pricing engine.
+```bash
+npx tsc --project stow/tsconfig.json --noEmit
+```

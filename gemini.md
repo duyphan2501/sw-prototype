@@ -61,12 +61,14 @@ It is a focused proof-of-concept for safer inventory state handling.
 
 * customer-facing chat UI;
 * real LLM interaction;
-* streaming assistant response;
-* real Cancel Response interaction;
+* non-streaming assistant response with customer-facing "AI is thinking..." state;
+* real Cancel Response interaction via `AbortController`;
 * structured inventory intent extraction;
-* deterministic inventory state mutation;
+* deterministic inventory state mutation (`REPLACE`, `ADD`, `REMOVE`);
 * deterministic CBM calculation;
-* regression tests.
+* deterministic storage unit recommendation;
+* multi-turn clarification state preservation (`pendingClarification`);
+* regression and end-to-end cancellation validation tests.
 
 ### Out of scope
 
@@ -94,51 +96,65 @@ It is a focused proof-of-concept for safer inventory state handling.
 Use a minimal architecture:
 
 ```text
-                    ┌───────────────┐
-                    │   Chat UI     │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │      LLM      │
-                    │ Intent + Text │
-                    └───────┬───────┘
-                            │
-                    structured intent
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ Inventory State   │
-                  │ deterministic     │
-                  └─────────┬─────────┘
-                            │
-                  canonical inventory
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │  CBM Calculator   │
-                  │ deterministic     │
-                  └─────────┬─────────┘
-                            │
-                            ▼
-                         Estimate
-                            │
-                            ▼
-                           LLM
-                            │
-                       stream response
-                            │
-                            ▼
-                         Chat UI
+                    ┌───────────────────┐
+                    │      Chat UI      │
+                    └─────────┬─────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │  LLM Intent Extr. │
+                    └─────────┬─────────┘
+                              │
+                      structured intent
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │ Intent Validation │
+                    └─────────┬─────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │  Inventory State  │
+                    │   deterministic   │
+                    └─────────┬─────────┘
+                              │
+                     canonical inventory
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │  CBM Calculator   │
+                    │   deterministic   │
+                    └─────────┬─────────┘
+                              │
+                        verified CBM
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │  Storage Recomm.  │
+                    │   deterministic   │
+                    └─────────┬─────────┘
+                              │
+                    verified recommendation
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │      LLM Text     │
+                    │ (anti-hallucinate)│
+                    └─────────┬─────────┘
+                              │
+                      verified response
+                              │
+                              ▼
+                           Chat UI
 ```
 
-The LLM must NOT directly mutate business state.
+The LLM must NOT directly mutate business state or calculate CBM/storage unit size.
 
 ---
 
 # 5. State Model
 
-Only two state concepts are required.
+The state concepts required:
 
 ## canonicalInventory
 
@@ -150,18 +166,34 @@ canonicalInventory: InventoryItem[]
 
 This is the only inventory state used by the calculator.
 
-## pendingGeneration
+## inventoryInitialized
 
-Temporary state associated with the currently generating assistant response.
+A boolean flag distinguishing the user's initial inventory setup from an already established, but currently empty, inventory (`[]`).
 
 ```ts
-pendingGeneration: {
-  status: "generating" | "cancelled" | "completed"
-  ...
+inventoryInitialized: boolean
+```
+
+## pendingClarification
+
+Preserves uncommitted, ambiguous inventory items when an operation is `UNCLEAR` on an initialized inventory.
+
+```ts
+pendingClarification: {
+  items: InventoryItem[]
 } | null
 ```
 
-Do not create unnecessary abstractions for conversation state, lifecycle state, policy state, etc.
+## pendingGeneration
+
+Temporary generation state associated with the currently generating assistant request (`isGenerating`, `AbortController`).
+
+```ts
+isGenerating: boolean
+abortControllerRef: React.RefObject<AbortController | null>
+```
+
+Do not create unnecessary abstractions for session databases, lifecycle frameworks, etc.
 
 The prototype only needs enough state to demonstrate the invariant.
 
@@ -176,11 +208,11 @@ The central invariant is:
 When the user clicks Cancel:
 
 ```text
-active LLM stream
+active LLM request
        ↓
-Abort
+Abort (AbortController)
        ↓
-discard pendingGeneration
+discard temporary generation state
        ↓
 canonicalInventory remains authoritative
 ```
@@ -216,11 +248,11 @@ LLM:
   "operation": "REPLACE",
   "items": [
     {
-      "name": "queen-size bed",
+      "type": "queen_bed",
       "quantity": 1
     },
     {
-      "name": "three-seat sofa",
+      "type": "three_seat_sofa",
       "quantity": 1
     }
   ]
@@ -229,12 +261,14 @@ LLM:
 
 ### B. Generate the natural-language assistant response
 
-The response can be streamed to the UI.
+The response is delivered upon completion while displaying "AI is thinking..." during active generation.
 
 ## LLM must NOT
 
 * directly mutate canonical inventory;
 * decide authoritative CBM;
+* hallucinate unsupported storage unit sizes or dimensions (e.g. 10x10, 100 sq ft);
+* override deterministic storage recommendation or CBM;
 * directly merge old and new business state;
 * bypass validation;
 * determine final storage state through free-form text.
@@ -313,11 +347,13 @@ bed + sofa
 
 Example:
 
-> "I need to store a bed and sofa."
+> "I need to store a queen-size bed and a three-seat sofa."
 
-If the system cannot determine whether the user intends to replace the existing inventory or add to it, it should not silently mutate state.
+The system handles UNCLEAR according to the initialization state:
 
-It may ask for clarification.
+- **When `inventoryInitialized = false`**: Identifiable items are treated as establishing the initial inventory (`REPLACE`). They are applied directly to `canonicalInventory` without prompting the user for clarification.
+- **When `inventoryInitialized = true`**: The system does not mutate state. It asks: *"Would you like me to add [items] to your current inventory, or replace your current inventory with those items?"* and preserves `pendingClarification = { items: [...] }`.
+  - When the user answers `"add"` or `"replace"` (or natural phrasing variants), the system resolves the operation directly with the pending items without invoking the intent LLM for the standalone word.
 
 ---
 
@@ -332,13 +368,15 @@ LLM structured intent
       ↓
 Schema validation
       ↓
-Deterministic inventory operation
+Deterministic inventory operation (REPLACE / ADD / REMOVE)
       ↓
 canonicalInventory
       ↓
-CBM calculation
+Deterministic CBM calculation
       ↓
-LLM response
+Deterministic Storage Recommendation
+      ↓
+LLM verified response (anti-hallucination)
 ```
 
 The LLM output is untrusted input.
@@ -347,18 +385,18 @@ The application must validate the structured intent before applying it.
 
 ---
 
-# 10. CBM Calculator
+# 10. CBM Calculator & Storage Recommendation
 
-Use a deterministic mock calculator.
+Use a deterministic mock calculator and recommendation layer.
 
 The purpose is to demonstrate the business consequence of stale inventory, not to reproduce MyStorage's internal pricing calculator.
 
-Example volume assumptions:
+Fixed volume values:
 
 ```text
-queen-size bed           2.5 CBM
+queen_bed                1.5 CBM
 three-seat sofa          2.0 CBM
-wardrobe                 1.5 CBM
+wardrobe                 1.2 CBM
 dining table + 4 chairs  2.0 CBM
 box                      0.1 CBM
 ```
@@ -371,9 +409,22 @@ canonicalInventory
 
 It must never receive raw conversation history or stale generation context.
 
+### Storage Unit Recommendation
+
+The application deterministically selects the smallest unit that fits the verified CBM:
+
+```text
+Small:   3 CBM  ("Small storage unit")
+Medium:  5 CBM  ("Medium storage unit")
+Large:  10 CBM  ("Large storage unit")
+Exceeding 10 CBM: null (no configured prototype option)
+```
+
+The LLM is strictly forbidden from calculating or hallucinating alternative unit dimensions (e.g., "10x10", "100 sq ft").
+
 ---
 
-# 11. Cancellation / Streaming
+# 11. Cancellation & Response State
 
 The Cancel Response button must perform a real cancellation of the active generation.
 
@@ -384,17 +435,17 @@ Conceptually:
 ```text
 Send
  ↓
-start LLM stream
+start LLM request
  ↓
-display streamed response
- ↓
-show "Cancel Response"
+display "AI is thinking..." + "Cancel Response"
  ↓
 user clicks Cancel
  ↓
-abort active request
+abort active request via AbortController
  ↓
-discard pendingGeneration
+UI returns to idle, temporary generation discarded
+ ↓
+canonicalInventory remains authoritative
 ```
 
 Do not implement Cancel merely as:
@@ -421,9 +472,9 @@ It should feel like a real chat product, not an engineering demo.
 │                                      │
 │ User message                         │
 │                                      │
-│ Assistant response...                │
+│ AI is thinking...                    │
 │                                      │
-│        [ Cancel Response ]            │
+│        [ Cancel Response ]           │
 │                                      │
 │                                      │
 ├──────────────────────────────────────┤
@@ -434,10 +485,10 @@ It should feel like a real chat product, not an engineering demo.
 Required interactions:
 
 * send message;
-* streaming response;
+* "AI is thinking..." state during generation;
 * Cancel Response while generating;
 * send another message after cancellation;
-* reset conversation.
+* multi-turn clarification for ambiguous inventory requests.
 
 Do not add:
 
@@ -605,27 +656,44 @@ Prefer straightforward functions and small modules.
 
 ---
 
-# 17. Suggested Project Structure
+# 17. Project Structure
 
 ```text
-src/
-├── app/
-│   └── page.tsx
-│
-├── components/
-│   └── Chat.tsx
-│
-├── lib/
-│   ├── inventory.ts
-│   ├── parser.ts
-│   ├── calculator.ts
-│   └── llm.ts
-│
-└── types.ts
-
-tests/
-├── inventory.test.ts
-└── cancellation.test.ts
+sw-prototype/
+├── package.json          # Root scripts routing to stow workspace
+├── README.md             # Project documentation & run guide
+├── gemini.md             # Master prototype context
+├── docs/                 # Assignment & review notes
+└── stow/                 # Next.js Application
+    ├── app/
+    │   ├── api/chat/route.ts
+    │   ├── globals.css
+    │   ├── layout.tsx
+    │   └── page.tsx
+    ├── components/
+    │   ├── Chat.tsx
+    │   ├── ChatInput.tsx
+    │   └── ChatMessageList.tsx
+    ├── lib/
+    │   ├── calculator.ts
+    │   ├── inventory.ts
+    │   ├── inventoryFlow.ts
+    │   ├── inventoryIntent.ts
+    │   ├── inventoryIntentValidator.ts
+    │   ├── llm.ts
+    │   └── storageRecommendation.ts
+    ├── types/
+    │   ├── chat.ts
+    │   └── inventory.ts
+    └── tests/
+        ├── calculator.test.ts
+        ├── cancellation.test.ts
+        ├── chat-api.test.ts
+        ├── inventory.test.ts
+        ├── inventoryFlow.test.ts
+        ├── inventoryIntent.test.ts
+        ├── phase10-e2e.test.ts
+        └── storageRecommendation.test.ts
 ```
 
 Keep the number of files small unless implementation needs otherwise.
@@ -655,14 +723,15 @@ Build in this order:
 
 ```text
 1. Chat UI
-2. LLM streaming
-3. Real Cancel Response
+2. Real LLM + AI thinking state
+3. Real Cancel Response (AbortController)
 4. canonicalInventory
 5. deterministic inventory operations
 6. CBM calculator
 7. explicit intent extraction
-8. regression tests
-9. visual polish
+8. deterministic storage recommendation
+9. multi-turn clarification
+10. regression & E2E validation tests
 ```
 
 Do not spend time on architecture documentation or UI components before the main interaction works.
@@ -672,7 +741,7 @@ The critical path is:
 ```text
 SEND
   ↓
-STREAM
+AI IS THINKING...
   ↓
 CANCEL
   ↓
@@ -680,7 +749,7 @@ SEND NEXT INVENTORY UPDATE
   ↓
 CORRECT STATE
   ↓
-CORRECT CALCULATION
+CORRECT CALCULATION & RECOMMENDATION
 ```
 
 ---
@@ -691,24 +760,12 @@ The prototype is complete when a reviewer can:
 
 1. open the app;
 2. send a natural-language inventory request;
-3. see the assistant stream a response;
+3. see the assistant show "AI is thinking..." and return the completed response;
 4. click Cancel Response while it is generating;
 5. send an explicit inventory update;
 6. see that the cancelled response does not contaminate the new inventory state;
 7. test `REPLACE`, `ADD`, and `REMOVE`;
 8. see a deterministic CBM estimate based on the resulting inventory;
-9. run the regression tests successfully.
+9. see a deterministic storage unit recommendation without LLM hallucinations;
+10. run all regression & end-to-end tests successfully.
 
-The prototype should be small enough to explain in a few minutes and clear enough that the reviewer can immediately connect:
-
-```text
-REAL STOW FINDING
-       ↓
-STATE INVARIANT
-       ↓
-PROPOSED FIX
-       ↓
-WORKING PROTOTYPE
-       ↓
-REGRESSION TESTS
-```
